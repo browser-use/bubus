@@ -263,9 +263,11 @@ Automatically track event relationships and causality tree:
 ```python
 async def parent_handler(event: BaseEvent):
     # handlers can emit more events to be processed asynchronously after this handler completes
-    child_event_async = event.event_bus.dispatch(ChildEvent())   # equivalent to bus.dispatch(...)
-    assert child_event_async.status != 'completed'
-    # ChildEvent handlers will run after parent_handler exits
+    child = ChildEvent()
+    child_event_async = event.event_bus.dispatch(child)   # equivalent to bus.dispatch(...)
+    assert child.event_status != 'completed'
+    assert child_event_async.event_parent_id == event.event_id
+    await child_event_async
 
     # or you can dispatch an event and block until it finishes processing by awaiting the event
     # this recursively waits for all handlers, including if event is forwarded to other buses
@@ -275,12 +277,20 @@ async def parent_handler(event: BaseEvent):
     assert child_event_sync.event_status == 'completed'
 
     # in all cases, parent-child relationships are automagically tracked
-    assert child_event_async.event_parent_id == event.event_id
     assert child_event_sync.event_parent_id == event.event_id
 
-parent_event = bus.dispatch(ParentEvent())
-print(parent_event.event_children)           # show all the child events emitted during handling of an event
-print(bus.log_tree())                        # print a nice pretty tree view of the entire event hierarchy
+async def run_main():
+    bus.on(ChildEvent, child_handler)
+    bus.on(ParentEvent, parent_handler)
+
+    parent_event = bus.dispatch(ParentEvent())
+    print(parent_event.event_children)           # show all the child events emitted during handling of an event
+    await parent_event
+    print(bus.log_tree())
+    await bus.stop()
+
+if __name__ == '__main__':
+    asyncio.run(run_main())
 ```
 
 <img width="1145" alt="image" src="https://github.com/user-attachments/assets/f94684a6-7694-4066-b948-46925f47b56c" />
