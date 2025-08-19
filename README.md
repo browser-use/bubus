@@ -470,6 +470,49 @@ await bus.dispatch(DataEvent())
 
 <br/>
 
+### 🔧 Middleware System
+
+Add cross-cutting concerns like analytics, error handling, and logging using Django-style middleware:
+
+```python
+from bubus import EventBus, BaseEvent
+from bubus.middleware import EventBusMiddleware
+
+class LoggingMiddleware(EventBusMiddleware):
+    def __call__(self, get_handler_result):
+        async def get_handler_result_wrapped_by_middleware(event: BaseEvent):
+            print(f"Processing {event.event_type}")
+            
+            try:
+                result = await get_handler_result(event)
+                print(f"Handler succeeded")
+                return result
+            except Exception as e:
+                print(f"Handler failed: {e}")
+                raise
+        
+        return get_handler_result_wrapped_by_middleware
+
+# Create event bus with middleware
+bus = EventBus(middlewares=[LoggingMiddleware()])
+```
+
+**Built-in Middleware:**
+
+```python
+from bubus.middleware import WALEventBusMiddleware
+
+# WAL middleware for event persistence
+bus = EventBus(middlewares=[
+    WALEventBusMiddleware('./events.jsonl')
+])
+
+# Or enable WAL automatically with wal_path parameter
+bus = EventBus(wal_path='./events.jsonl')  # Automatically adds WAL middleware
+```
+
+<br/>
+
 ### 📝 Write-Ahead Logging
 
 Persist events automatically to a `jsonl` file for future replay and debugging:

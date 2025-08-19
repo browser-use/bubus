@@ -6,7 +6,7 @@ import traceback
 import warnings
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast, overload
@@ -51,6 +51,8 @@ QueueEntryType = TypeVar('QueueEntryType', bound='BaseEvent[Any]')
 T_ExpectedEvent = TypeVar('T_ExpectedEvent', bound='BaseEvent[Any]')
 
 EventPatternType = PythonIdentifierStr | Literal['*'] | type['BaseEvent[Any]']
+
+# EventBusMiddleware will be imported dynamically to avoid circular imports
 
 
 class CleanShutdownQueue(asyncio.Queue[QueueEntryType]):
@@ -281,6 +283,7 @@ class EventBus:
         wal_path: Path | str | None = None,
         parallel_handlers: bool = False,
         max_history_size: int | None = 50,  # Keep only 50 events in history
+        middlewares: list[Any] | None = None,
     ):
         self.id = uuid7str()
         self.name = name or f'{self.__class__.__name__}_{self.id[-8:]}'
@@ -334,6 +337,13 @@ class EventBus:
         self.parallel_handlers = parallel_handlers
         self.wal_path = Path(wal_path) if wal_path else None
         self._on_idle = None
+        
+        # Set up middlewares, adding WAL middleware if wal_path is provided
+        self.middlewares = middlewares or []
+        if wal_path:
+            # Import here to avoid circular imports
+            from bubus.middleware import WALEventBusMiddleware
+            self.middlewares.append(WALEventBusMiddleware(wal_path))
 
         # Memory leak prevention settings
         self.max_history_size = max_history_size
@@ -977,7 +987,6 @@ class EventBus:
         await self._execute_handlers(event, handlers=applicable_handlers, timeout=timeout)
 
         await self._default_log_handler(event)
-        await self._default_wal_handler(event)
 
         # Mark event as complete if all handlers are done
         event.event_mark_complete_if_all_handlers_completed()
@@ -1051,8 +1060,8 @@ class EventBus:
             context = contextvars.copy_context()
             for handler_id, handler in applicable_handlers.items():
                 task = asyncio.create_task(
-                    self._execute_sync_or_async_handler(event, handler, timeout=timeout),
-                    name=f'{self}._execute_sync_or_async_handler({event}, {get_handler_name(handler)})',
+                    self._execute_handler_with_middlewares(event, handler, timeout=timeout),
+                    name=f'{self}._execute_handler_with_middlewares({event}, {get_handler_name(handler)})',
                     context=context,
                 )
                 handler_tasks[handler_id] = (task, handler)
@@ -1062,19 +1071,49 @@ class EventBus:
                 try:
                     await task
                 except Exception:
-                    # Error already logged and recorded in _execute_sync_or_async_handler
+                    # Error already logged and recorded in _execute_handler_with_middlewares
                     pass
         else:
             # otherwise, execute handlers serially, wait until each one completes before moving on to the next
             for handler_id, handler in applicable_handlers.items():
                 try:
-                    await self._execute_sync_or_async_handler(event, handler, timeout=timeout)
+                    await self._execute_handler_with_middlewares(event, handler, timeout=timeout)
                 except Exception as e:
-                    # Error already logged and recorded in _execute_sync_or_async_handler
+                    # Error already logged and recorded in _execute_handler_with_middlewares
                     logger.debug(
                         f'❌ {self} Handler {get_handler_name(handler)}#{str(id(handler))[-4:]}({event}) failed with {type(e).__name__}: {e}'
                     )
                     pass
+
+    async def _execute_handler_with_middlewares(
+        self, event: 'BaseEvent[T_EventResultType]', handler: EventHandler, timeout: float | None = None
+    ) -> Any:
+        """Execute a handler through the Django-style middleware chain"""
+        if not self.middlewares:
+            # No middlewares, execute handler directly
+            return await self._execute_sync_or_async_handler(event, handler, timeout)
+        
+        # Create Django-style middleware chain by wrapping the handler in middleware layers
+        async def base_handler(event: 'BaseEvent[Any]') -> Any:
+            return await self._execute_sync_or_async_handler(event, handler, timeout)
+        
+        # Wrap the handler with each middleware (in reverse order for correct execution)
+        wrapped_handler = base_handler
+        for middleware in reversed(self.middlewares):
+            try:
+                wrapped_handler = middleware(wrapped_handler)
+            except Exception as e:
+                # Log middleware initialization error and re-raise
+                handler_id = get_handler_id(handler, self)
+                logger.exception(
+                    f'❌ {self} Error initializing middleware {middleware.__class__.__name__} '
+                    f'for handler {get_handler_name(handler)}#{handler_id[-4:]}({event}) -> {type(e).__name__}({e})',
+                    exc_info=True,
+                )
+                raise
+        
+        # Execute the wrapped handler
+        return await wrapped_handler(event)
 
     async def _execute_sync_or_async_handler(
         self, event: 'BaseEvent[T_EventResultType]', handler: EventHandler, timeout: float | None = None
@@ -1307,19 +1346,7 @@ class EventBus:
         # )
         pass
 
-    async def _default_wal_handler(self, event: 'BaseEvent[Any]') -> None:
-        """Persist completed event to WAL file as JSONL"""
-
-        if not self.wal_path:
-            return None
-
-        try:
-            event_json = event.model_dump_json()  # pyright: ignore[reportUnknownMemberType]
-            self.wal_path.parent.mkdir(parents=True, exist_ok=True)
-            async with await anyio.open_file(self.wal_path, 'a', encoding='utf-8') as f:  # pyright: ignore[reportUnknownMemberType]
-                await f.write(event_json + '\n')  # pyright: ignore[reportUnknownMemberType]
-        except Exception as e:
-            logger.error(f'❌ {self} Failed to save event {event.event_id} to WAL file: {type(e).__name__} {e}\n{event}')
+    # WAL functionality is now handled by WALEventBusMiddleware
 
     def cleanup_excess_events(self) -> int:
         """

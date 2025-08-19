@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+import traceback
 from collections.abc import Awaitable, Callable, Generator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Literal, Protocol, Self, TypeAlias, cast, runtime_checkable
@@ -940,6 +941,9 @@ class EventResult(BaseModel, Generic[T_EventResultType]):
         from bubus.logging import log_eventresult_tree
 
         log_eventresult_tree(self, indent, is_last, child_events_by_parent)
+
+
+# Analytics events are now in bubus.middleware module
 
 
 # Resolve forward references
