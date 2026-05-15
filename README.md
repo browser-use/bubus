@@ -8,6 +8,8 @@ It provides a [pydantic](https://docs.pydantic.dev/latest/)-based API for implem
 
 ♾️ It's inspired by the simplicity of async and events in `JS`, we aim to bring a fully type-checked [`EventTarget`](https://developer.mozilla.org/en-US/docs/Web/API/EventTarget)-style API to Python.
 
+Used in Browser Use: Bubus is one of the async coordination primitives behind long-running Browser Use agents. To run Browser Use automation continuously from your own machine, see [Browser Use Box](https://browser-use.com/bux) and [watch the 15-second demo](https://www.tiktok.com/@browser_use/video/7639824093721758989).
+
 <br/>
 
 ## 🔢 Quickstart
