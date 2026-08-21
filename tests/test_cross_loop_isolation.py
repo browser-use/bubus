@@ -87,26 +87,32 @@ async def test_await_drain_does_not_process_other_loops_buses():
             pass
 
     bus_a.on(ParentEvent, parent_handler)
-    await bus_a.dispatch(ParentEvent())
+    try:
+        await bus_a.dispatch(ParentEvent())
 
-    # The probe belongs to bus B's loop. Loop A must NOT have run it.
-    assert ran_on.get('probe') != id(loop_a), (
-        "ProbeEvent from bus B ran on bus A's loop — cross-loop contamination"
-    )
+        # The probe belongs to bus B's loop. Loop A must NOT have run it.
+        assert ran_on.get('probe') != id(loop_a), (
+            "ProbeEvent from bus B ran on bus A's loop — cross-loop contamination"
+        )
 
-    # Once bus B is free, its own loop processes the probe — on loop B.
-    release_blocker.set()
-    for _ in range(100):
-        if 'probe' in ran_on:
-            break
-        await asyncio.sleep(0.02)
-    assert ran_on.get('probe') == id(loop_b)
-
-    # --- Cleanup ---
-    asyncio.run_coroutine_threadsafe(bus_b.stop(), loop_b).result(timeout=5)
-    await bus_a.stop()
-    loop_b.call_soon_threadsafe(loop_b.stop)
-    thread.join(timeout=5)
+        # Once bus B is free, its own loop processes the probe — on loop B.
+        release_blocker.set()
+        for _ in range(100):
+            if 'probe' in ran_on:
+                break
+            await asyncio.sleep(0.02)
+        assert ran_on.get('probe') == id(loop_b)
+    finally:
+        # Always tear down, even if an assertion above fails, so a failing run
+        # never leaks bus B's still-spinning run loop or its background thread
+        # into later tests.
+        release_blocker.set()
+        try:
+            asyncio.run_coroutine_threadsafe(bus_b.stop(), loop_b).result(timeout=5)
+        finally:
+            await bus_a.stop()
+            loop_b.call_soon_threadsafe(loop_b.stop)
+            thread.join(timeout=5)
 
 
 async def _dispatch_probe(bus: EventBus) -> ProbeEvent:

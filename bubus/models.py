@@ -308,13 +308,15 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                             if not bus or not bus.event_queue:
                                 continue
 
-                            # Only drain buses that belong to the current event loop. Draining a
-                            # bus owned by another loop runs its handlers on the wrong loop, where
-                            # they hang forever and pile up until the bus hits its capacity limit
-                            # (cross-loop contamination, browser-use/browser-use#5509). Each bus's
-                            # own _run_loop drains it on its own loop. A bus that hasn't started yet
-                            # (_loop is None) has no run loop to poll against, so skip it here too.
-                            if bus._loop is not current_loop:
+                            # Only drain running buses that belong to the current event loop.
+                            # Draining a bus owned by another loop runs its handlers on the wrong
+                            # loop, where they hang forever and pile up until the bus hits its
+                            # capacity limit (cross-loop contamination, browser-use/browser-use#5509).
+                            # Each bus's own _run_loop drains it on its own loop. Skip buses that
+                            # haven't started (_loop is None) or have been stopped (_is_running is
+                            # False) — a stopped bus can keep _loop set with events still queued, and
+                            # nothing should run its handlers after stop().
+                            if not bus._is_running or bus._loop is not current_loop:
                                 continue
 
                             # Process one event from this bus if available
