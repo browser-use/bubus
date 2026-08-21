@@ -274,6 +274,7 @@ class EventBus:
     _is_running: bool = False
     _runloop_task: asyncio.Task[None] | None = None
     _on_idle: asyncio.Event | None = None
+    _loop: asyncio.AbstractEventLoop | None = None  # the event loop this bus's run loop was started on
 
     def __init__(
         self,
@@ -733,6 +734,7 @@ class EventBus:
                     self._on_idle.clear()  # Start in a busy state unless we confirm queue is empty by running step() at least once
 
                 # Create and start the run loop task
+                self._loop = loop
                 self._runloop_task = loop.create_task(self._run_loop(), name=f'{self}._run_loop')
                 self._is_running = True
             except RuntimeError:
