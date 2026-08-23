@@ -1127,9 +1127,23 @@ class EventBus:
                 # This allows us to process child events when the handler awaits them
                 result_value: Any = await asyncio.wait_for(handler_task, timeout=event_result.timeout)
             elif inspect.isfunction(handler) or inspect.ismethod(handler):
-                # If handler function is sync function, run it directly in the main thread
-                # This blocks but ensures we have access to the event loop, dont run it in a subthread!
-                result_value: Any = handler(event)
+                # If handler function is sync function, run it in a worker thread
+                # via anyio.to_thread.run_sync so that the handler timeout can
+                # actually cancel it. anyio's thread cancellation works by
+                # cancelling the portal task, unlike run_in_executor which
+                # cannot cancel the underlying thread.
+                #
+                # Previously this ran directly in the event loop thread, which
+                # blocked the loop entirely and made the timeout useless.
+                if event_result.timeout is not None:
+                    with anyio.fail_after(event_result.timeout):
+                        result_value: Any = await anyio.to_thread.run_sync(
+                            handler, event, abandon_on_cancel=True
+                        )
+                else:
+                    result_value: Any = await anyio.to_thread.run_sync(
+                        handler, event
+                    )
 
                 # If the sync handler returned a BaseEvent (from dispatch), DON'T await it
                 # For forwarding handlers like bus.on('*', other_bus.dispatch), the handler
