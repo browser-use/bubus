@@ -1211,13 +1211,27 @@ class EventBus:
             inside_handler_context.reset(handler_token)
             _current_handler_id_context.reset(handler_id_token)
 
-            # Ensure handler task is cancelled if it's still running
+            # Ensure handler task is cancelled if it's still running.
+            # If the handler is blocked in synchronous code (e.g. via
+            # run_in_executor or a C-level call), CancelledError cannot be
+            # delivered and the task won't respond to cancel().  We try once
+            # with a short grace period, then abandon the task so we don't
+            # hold the global lock indefinitely.  The zombie thread is logged
+            # so it can be diagnosed; it will be cleaned up when the process
+            # exits (it's a daemon thread under the default executor).
             if handler_task and not handler_task.done():
                 handler_task.cancel()
                 try:
-                    await asyncio.wait_for(handler_task, timeout=0.1)
+                    await asyncio.wait_for(handler_task, timeout=1.0)
                 except (asyncio.CancelledError, TimeoutError):
-                    pass  # Expected when we cancel the task
+                    if not handler_task.done():
+                        logger.warning(
+                            f'⚠️ {self} handler {get_handler_name(handler)}()'
+                            f' could not be cancelled (still running after 1s).'
+                            f' It is likely blocked in synchronous code and will'
+                            f' be abandoned as a zombie thread.'
+                        )
+                    pass  # Abandon the task — can't cancel blocking sync code
 
             # Ensure monitor task is cancelled
             try:
