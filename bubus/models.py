@@ -295,6 +295,24 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                 max_iterations = 1000  # Prevent infinite loops
                 iterations = 0
 
+                # Compute this event's ancestry chain once, so the drain loop
+                # below only processes events that belong to this waiting
+                # chain. Draining unrelated events from other buses (cross-loop
+                # contamination) consumes them with the wrong handler table and
+                # can stall or drop the owning bus's work — see issue #5509.
+                ancestor_ids: set[str] = {self.event_id}
+                cursor: BaseEvent[Any] | None = self
+                while cursor is not None and cursor.event_parent_id:
+                    parent_event: BaseEvent[Any] | None = None
+                    for bus in list(EventBus.all_instances):
+                        if bus and cursor.event_parent_id in bus.event_history:
+                            parent_event = bus.event_history[cursor.event_parent_id]
+                            break
+                    if parent_event is None or parent_event.event_id in ancestor_ids:
+                        break
+                    ancestor_ids.add(parent_event.event_id)
+                    cursor = parent_event
+
                 try:
                     while not self.event_completed_signal.is_set() and iterations < max_iterations:
                         iterations += 1
@@ -309,10 +327,29 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                             # Process one event from this bus if available
                             try:
                                 if bus.event_queue.qsize() > 0:
-                                    event = bus.event_queue.get_nowait()
-                                    await bus.process_event(event)
-                                    bus.event_queue.task_done()
-                                    processed_any = True
+                                    # Only process events that belong to this
+                                    # waiting chain. Locate the first such event
+                                    # in the queue and process just that one;
+                                    # unrelated events (from other buses or
+                                    # independent tasks) keep their FIFO position
+                                    # untouched and are left for their own bus's
+                                    # run loop — draining them here is cross-loop
+                                    # contamination that steals the owning bus's
+                                    # scheduling (issue #5509).
+                                    # The underlying deque is indexed directly
+                                    # (same approach as the memory-usage check);
+                                    # task_done() pairs with the put() that
+                                    # enqueued the event.
+                                    for idx, candidate in enumerate(bus.event_queue._queue):
+                                        if (
+                                            candidate.event_id in ancestor_ids
+                                            or candidate.event_parent_id in ancestor_ids
+                                        ):
+                                            del bus.event_queue._queue[idx]
+                                            bus.event_queue.task_done()
+                                            await bus.process_event(candidate)
+                                            processed_any = True
+                                            break
                                     # Check if the event we're waiting for is now complete
                                     if self.event_completed_signal.is_set():
                                         break
