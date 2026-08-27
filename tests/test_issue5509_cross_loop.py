@@ -82,17 +82,16 @@ async def test_bus_b_event_not_processed_inside_bus_a_drain(buses):
         return event.value
 
     async def child_handler(event: ChildAEvent) -> str:
-        # Forward the grandchild to bus B (cross-bus child dispatch). Bus B's
-        # queue then holds [independent event, grandchild], so the inner drain
-        # loop must skip the unrelated event and still process the grandchild.
-        grandchild = GrandchildAEvent(value=1)
-        bus_b.dispatch(grandchild)
         # Tell the test the chain is armed; wait until bus B's independent
-        # event is queued BEFORE entering the inner drain loop, so the
-        # drain's first scan of `EventBus.all_instances` sees it.
+        # event is queued BEFORE forwarding the grandchild, so bus B's queue
+        # holds [independent event, grandchild] when the inner drain loop
+        # scans it — the drain must skip the unrelated event and still
+        # process the grandchild.
         ready.set()
         await proceed.wait()
         order.append("a_drain_enter")
+        grandchild = GrandchildAEvent(value=1)
+        bus_b.dispatch(grandchild)
         await grandchild
         order.append("a_drain_exit")
         return "child_handled"
@@ -112,13 +111,21 @@ async def test_bus_b_event_not_processed_inside_bus_a_drain(buses):
     bus_a.on("ParentAEvent", handler_a)
     bus_b.on("BusBEvent", handler_b)
 
-    # Start bus A's event chain; wait until its inner drain is armed.
+    # Start bus A's event chain; wait until its handler holds the global lock
+    # (child_handler is parked on `proceed` inside bus A's run loop).
     bus_a.dispatch(ParentAEvent(message="trigger"))
     await asyncio.wait_for(ready.wait(), timeout=5)
 
-    # Queue an INDEPENDENT event on bus B (directly into its queue) so it is
-    # present when bus A's inner drain loop first scans `all_instances`.
-    bus_b.event_queue.put_nowait(BusBEvent(payload="independent-work"))
+    # Dispatch an event on bus B: its run loop `get()`s it (outside the lock)
+    # and then blocks acquiring the global lock held by bus A — so bus B's
+    # consumer is parked and will not `get()` again until the lock is free.
+    bus_b.dispatch(BusBEvent(payload="first"))
+    await asyncio.sleep(0.05)
+
+    # Queue a SECOND independent event on bus B (directly into its queue):
+    # with bus B's run loop parked on the lock, this event is only reachable
+    # by bus A's drain loop — the cross-loop window (issue #5509).
+    bus_b.event_queue.put_nowait(BusBEvent(payload="second"))
     proceed.set()
 
     await asyncio.gather(
@@ -126,11 +133,12 @@ async def test_bus_b_event_not_processed_inside_bus_a_drain(buses):
         bus_b.wait_until_idle(timeout=5),
     )
 
-    # Bus B's event must NOT be processed while bus A's drain loop is running
+    # Bus B's events must NOT be processed while bus A's drain loop is running
     # (inside bus A's handler context, holding the global lock): that is the
-    # cross-loop contamination. It must be handled afterwards by bus B's own
-    # run loop.
-    assert order == ["a_drain_enter", "a_drain_exit", "b_handled"], (
-        f"cross-loop contamination: bus B event was processed inside bus A's "
-        f"drain loop (order was {order!r}, expected drain first, then bus B)"
+    # cross-loop contamination. Both events must be handled afterwards by bus
+    # B's own run loop, once the lock is released.
+    assert order[:2] == ["a_drain_enter", "a_drain_exit"], f"drain markers missing: {order!r}"
+    assert order[2:] == ["b_handled", "b_handled"], (
+        f"cross-loop contamination: bus B events were processed inside bus A's "
+        f"drain loop (order was {order!r}, expected both bus B events after the drain)"
     )

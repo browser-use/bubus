@@ -341,13 +341,39 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                                     # task_done() pairs with the put() that
                                     # enqueued the event.
                                     for idx, candidate in enumerate(bus.event_queue._queue):
-                                        if (
-                                            candidate.event_id in ancestor_ids
-                                            or candidate.event_parent_id in ancestor_ids
-                                        ):
+                                        # The candidate belongs to this waiting
+                                        # chain iff it is this event or a
+                                        # descendant of it (its ancestor chain
+                                        # contains self.event_id). Matching on
+                                        # parent-id alone would also drain
+                                        # siblings that merely share a parent
+                                        # with the awaited event, stealing
+                                        # their normal scheduling.
+                                        if candidate.event_id in ancestor_ids:
+                                            matches = True
+                                        else:
+                                            matches = False
+                                            cursor_candidate = candidate
+                                            seen_ids: set[str] = set()
+                                            while cursor_candidate.event_parent_id and cursor_candidate.event_parent_id not in seen_ids:
+                                                seen_ids.add(cursor_candidate.event_parent_id)
+                                                if cursor_candidate.event_parent_id == self.event_id:
+                                                    matches = True
+                                                    break
+                                                parent_candidate = None
+                                                for other_bus in list(EventBus.all_instances):
+                                                    if other_bus and cursor_candidate.event_parent_id in other_bus.event_history:
+                                                        parent_candidate = other_bus.event_history[cursor_candidate.event_parent_id]
+                                                        break
+                                                if parent_candidate is None:
+                                                    break
+                                                cursor_candidate = parent_candidate
+                                        if matches:
                                             del bus.event_queue._queue[idx]
-                                            bus.event_queue.task_done()
-                                            await bus.process_event(candidate)
+                                            try:
+                                                await bus.process_event(candidate)
+                                            finally:
+                                                bus.event_queue.task_done()
                                             processed_any = True
                                             break
                                     # Check if the event we're waiting for is now complete
