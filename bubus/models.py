@@ -295,6 +295,19 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                 max_iterations = 1000  # Prevent infinite loops
                 iterations = 0
 
+                # Snapshot the buses once for the whole drain: the ancestry
+                # walk and the per-candidate descendant walk both look up
+                # events across this set, and rebuilding it per hop would make
+                # the drain O(candidates × bus_count × chain_depth) per
+                # iteration (review feedback on #5509).
+                buses_snapshot = list(EventBus.all_instances)
+
+                def _find_event_by_id(event_id: str) -> BaseEvent[Any] | None:
+                    for bus_ in buses_snapshot:
+                        if bus_ and event_id in bus_.event_history:
+                            return bus_.event_history[event_id]
+                    return None
+
                 # Compute this event's ancestry chain once, so the drain loop
                 # below only processes events that belong to this waiting
                 # chain. Draining unrelated events from other buses (cross-loop
@@ -303,11 +316,7 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                 ancestor_ids: set[str] = {self.event_id}
                 cursor: BaseEvent[Any] | None = self
                 while cursor is not None and cursor.event_parent_id:
-                    parent_event: BaseEvent[Any] | None = None
-                    for bus in list(EventBus.all_instances):
-                        if bus and cursor.event_parent_id in bus.event_history:
-                            parent_event = bus.event_history[cursor.event_parent_id]
-                            break
+                    parent_event = _find_event_by_id(cursor.event_parent_id)
                     if parent_event is None or parent_event.event_id in ancestor_ids:
                         break
                     ancestor_ids.add(parent_event.event_id)
@@ -360,11 +369,7 @@ class BaseEvent(BaseModel, Generic[T_EventResultType]):
                                                 if cursor_candidate.event_parent_id == self.event_id:
                                                     matches = True
                                                     break
-                                                parent_candidate = None
-                                                for other_bus in list(EventBus.all_instances):
-                                                    if other_bus and cursor_candidate.event_parent_id in other_bus.event_history:
-                                                        parent_candidate = other_bus.event_history[cursor_candidate.event_parent_id]
-                                                        break
+                                                parent_candidate = _find_event_by_id(cursor_candidate.event_parent_id)
                                                 if parent_candidate is None:
                                                     break
                                                 cursor_candidate = parent_candidate
