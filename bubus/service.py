@@ -453,17 +453,7 @@ class EventBus:
             f'Invalid handler: {handler}, must be a sync or async function or method'
         )
 
-        # Determine event key
-        event_key: str
-        if event_pattern == '*':
-            event_key = '*'
-        elif isinstance(event_pattern, type) and issubclass(event_pattern, BaseEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
-            event_key = event_pattern.__name__  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        else:
-            event_key = str(event_pattern)
-
-        # Ensure event_key is definitely a string at this point
-        assert isinstance(event_key, str)
+        event_key = self._get_event_key(event_pattern)
 
         # Check for duplicate handler names
         new_handler_name = get_handler_name(handler)
@@ -481,6 +471,38 @@ class EventBus:
         # Register handler
         self.handlers[event_key].append(handler)  # type: ignore
         logger.debug(f'👂 {self}.on({event_key}, {get_handler_name(handler)}) Registered event handler')
+
+    def _get_event_key(self, event_pattern: EventPatternType) -> str:
+        """Resolve an event pattern (type name string, event class, or '*') to the internal handler key."""
+        if event_pattern == '*':
+            return '*'
+        elif isinstance(event_pattern, type) and issubclass(event_pattern, BaseEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
+            return event_pattern.__name__  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        return str(event_pattern)
+
+    def remove(self, event_pattern: EventPatternType, handler: ContravariantEventHandler['BaseEvent[Any]']) -> bool:
+        """
+        Unsubscribe a previously registered handler from events matching a pattern.
+
+        Args:
+                event_pattern: The event type string, event model class, or '*' that was passed to `on()`.
+                handler: The exact handler function or method previously registered with `on()`.
+
+        Returns:
+                True if the handler was found and removed, False otherwise.
+
+        Example:
+                eventbus.on(TaskStartedEvent, handler)
+                ...
+                eventbus.remove(TaskStartedEvent, handler)
+        """
+        event_key = self._get_event_key(event_pattern)
+        registered_handlers = self.handlers.get(event_key, [])
+        if handler in registered_handlers:
+            registered_handlers.remove(handler)
+            logger.debug(f'👂 {self}.remove({event_key}, {get_handler_name(handler)}) Unregistered event handler')
+            return True
+        return False
 
     def dispatch(self, event: T_ExpectedEvent) -> T_ExpectedEvent:
         """
@@ -677,9 +699,7 @@ class EventBus:
                 return await future
         finally:
             # Clean up handler
-            event_key: str = event_type.__name__ if isinstance(event_type, type) else str(event_type)  # pyright: ignore[reportUnknownMemberType, reportPartialTypeErrors]
-            if event_key in self.handlers and notify_expect_handler in self.handlers[event_key]:
-                self.handlers[event_key].remove(notify_expect_handler)
+            self.remove(event_type, notify_expect_handler)
 
     def _start(self) -> None:
         """Start the event bus if not already running"""
