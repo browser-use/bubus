@@ -334,7 +334,7 @@ class EventBus:
 
         self.event_queue = None
         self.event_history = {}
-        self._outstanding_events: dict[UUIDStr, BaseEvent[Any]] = {}
+        self._outstanding_events: dict[int, BaseEvent[Any]] = {}
         self.handlers = defaultdict(list)
         self.parallel_handlers = parallel_handlers
         self.wal_path = Path(wal_path) if wal_path else None
@@ -570,7 +570,7 @@ class EventBus:
                 self.event_queue.put_nowait(event)
                 # Only add to history after successfully queuing
                 self.event_history[event.event_id] = event
-                self._outstanding_events[event.event_id] = event
+                self._outstanding_events[id(event)] = event
                 logger.info(
                     f'🗣️ {self}.dispatch({event.event_type}) ➡️ {event.event_type}#{event.event_id[-4:]} (#{self.event_queue.qsize()} {event.event_status})'
                 )
@@ -988,7 +988,7 @@ class EventBus:
         # Mark event as complete if all handlers are done
         event.event_mark_complete_if_all_handlers_completed()
         if event.event_status not in ('pending', 'started'):
-            self._outstanding_events.pop(event.event_id, None)
+            self._outstanding_events.pop(id(event), None)
 
         # After processing this event, check if any parent events can now be marked complete
         # We do this by walking up the parent chain

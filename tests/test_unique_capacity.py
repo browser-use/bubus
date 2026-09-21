@@ -72,3 +72,48 @@ async def test_started_event_survives_history_eviction_in_capacity_count():
     finally:
         release.set()
         await bus.stop(timeout=2, clear=True)
+
+
+async def test_distinct_instances_with_same_event_id_remain_counted():
+    bus = EventBus(max_history_size=1)
+    entered, release = asyncio.Event(), asyncio.Event()
+    completed = []
+
+    async def hold(event: BaseEvent):
+        entered.set()
+        await release.wait()
+        completed.append(id(event))
+
+    bus.on(BaseEvent, hold)
+    try:
+        first = bus.dispatch(BaseEvent())
+        await entered.wait()
+        second = bus.dispatch(BaseEvent(event_id=first.event_id))
+        assert len(bus._outstanding_events) == 2
+        release.set()
+        await bus.wait_until_idle(timeout=5)
+        assert sorted(completed) == sorted([id(first), id(second)])
+        assert not bus._outstanding_events
+    finally:
+        release.set()
+        await bus.stop(timeout=2, clear=True)
+
+
+async def test_repeated_same_instance_preserves_one_handler_execution():
+    bus = EventBus()
+    calls = []
+
+    async def consume(event: BaseEvent):
+        calls.append(id(event))
+
+    bus.on(BaseEvent, consume)
+    try:
+        event = BaseEvent()
+        bus.dispatch(event)
+        bus.dispatch(event)
+        assert bus.event_queue.qsize() == 2
+        await bus.wait_until_idle(timeout=5)
+        assert calls == [id(event)]
+        assert not bus._outstanding_events
+    finally:
+        await bus.stop(timeout=2, clear=True)
