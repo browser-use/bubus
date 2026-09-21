@@ -47,6 +47,10 @@ class QueueShutDown(Exception):
     pass
 
 
+class EventBusCapacityError(asyncio.QueueFull, RuntimeError):
+    """A bounded bus cannot admit another event."""
+
+
 QueueEntryType = TypeVar('QueueEntryType', bound='BaseEvent[Any]')
 T_ExpectedEvent = TypeVar('T_ExpectedEvent', bound='BaseEvent[Any]')
 
@@ -330,6 +334,7 @@ class EventBus:
 
         self.event_queue = None
         self.event_history = {}
+        self._outstanding_events: dict[int, BaseEvent[Any]] = {}
         self.handlers = defaultdict(list)
         self.parallel_handlers = parallel_handlers
         self.wal_path = Path(wal_path) if wal_path else None
@@ -542,18 +547,18 @@ class EventBus:
             f'Event.event_path must be a list of valid EventBus names, got: {event.event_path}'
         )
 
-        # Check hard limit on total pending events (queue + in-progress)
-        # Only enforce if we have memory limits set
+        # Outstanding admission is independent of truncated diagnostic history.
+        self._outstanding_events = {
+            key: value for key, value in self._outstanding_events.items() if value.event_status in ('pending', 'started')
+        }
         if self.max_history_size is not None:
             queue_size = self.event_queue.qsize() if self.event_queue else 0
-            pending_in_history = sum(1 for e in self.event_history.values() if e.event_status in ('pending', 'started'))
-            total_pending = queue_size + pending_in_history
-
-            if total_pending >= 100:
-                raise RuntimeError(
+            total_pending = len(self._outstanding_events)
+            if total_pending >= 100 or (self.event_queue and self.event_queue.full()):
+                raise EventBusCapacityError(
                     f'EventBus at capacity: {total_pending} pending events (100 max). '
-                    f'Queue: {queue_size}, Processing: {pending_in_history}. '
-                    f'Cannot accept new events until some complete.'
+                    f'Queue: {queue_size}, Processing: {max(0, total_pending - queue_size)}. '
+                    f'Queue limit: 50. Cannot accept new events until some complete.'
                 )
 
         # Auto-start if needed
@@ -565,6 +570,7 @@ class EventBus:
                 self.event_queue.put_nowait(event)
                 # Only add to history after successfully queuing
                 self.event_history[event.event_id] = event
+                self._outstanding_events[id(event)] = event
                 logger.info(
                     f'🗣️ {self}.dispatch({event.event_type}) ➡️ {event.event_type}#{event.event_id[-4:]} (#{self.event_queue.qsize()} {event.event_status})'
                 )
@@ -789,6 +795,7 @@ class EventBus:
         # Clear event history and handlers if requested (for memory cleanup)
         if clear:
             self.event_history.clear()
+            self._outstanding_events.clear()
             self.handlers.clear()
             # Remove from global instance tracking
             if self in EventBus.all_instances:
@@ -980,6 +987,8 @@ class EventBus:
 
         # Mark event as complete if all handlers are done
         event.event_mark_complete_if_all_handlers_completed()
+        if event.event_status not in ('pending', 'started'):
+            self._outstanding_events.pop(id(event), None)
 
         # After processing this event, check if any parent events can now be marked complete
         # We do this by walking up the parent chain
