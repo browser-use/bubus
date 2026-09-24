@@ -542,17 +542,20 @@ class EventBus:
             f'Event.event_path must be a list of valid EventBus names, got: {event.event_path}'
         )
 
-        # Check hard limit on total pending events (queue + in-progress)
+        # Check queue and hard limits on total pending events (queue + in-progress)
         # Only enforce if we have memory limits set
         if self.max_history_size is not None:
             queue_size = self.event_queue.qsize() if self.event_queue else 0
-            pending_in_history = sum(1 for e in self.event_history.values() if e.event_status in ('pending', 'started'))
-            total_pending = queue_size + pending_in_history
+            # Queued events are also stored in history as pending, so only started events are non-overlapping.
+            processing_count = sum(1 for event in self.event_history.values() if event.event_status == 'started')
+            total_pending = queue_size + processing_count
+            queue_is_full = self.event_queue.full() if self.event_queue else False
 
-            if total_pending >= 100:
+            if total_pending >= 100 or queue_is_full:
+                capacity_reason = '100 max' if total_pending >= 100 else 'queue full'
                 raise RuntimeError(
-                    f'EventBus at capacity: {total_pending} pending events (100 max). '
-                    f'Queue: {queue_size}, Processing: {pending_in_history}. '
+                    f'EventBus at capacity: {total_pending} pending events ({capacity_reason}). '
+                    f'Queue: {queue_size}, Processing: {processing_count}. '
                     f'Cannot accept new events until some complete.'
                 )
 

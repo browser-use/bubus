@@ -156,41 +156,30 @@ async def test_20k_events_with_memory_control():
 
 
 @pytest.mark.asyncio
-async def test_hard_limit_enforcement():
-    """Test that hard limit of 100 pending events is enforced"""
-    bus = EventBus(name='HardLimitTest')
+async def test_capacity_does_not_double_count_queued_events():
+    """Queued events should not also be reported as processing."""
+    bus = EventBus(name='CapacityAccountingTest')
 
     try:
-        # Create a slow handler to keep events pending
-        async def slow_handler(event: SimpleEvent) -> None:
-            await asyncio.sleep(0.5)  # Reduced from 10s to 0.5s
+        for _ in range(50):
+            bus.dispatch(SimpleEvent())
 
-        bus.on('SimpleEvent', slow_handler)
+        assert bus.event_queue is not None
+        assert bus.event_queue.qsize() == 50
+        assert len(bus.events_pending) == 50
+        assert len(bus.events_started) == 0
 
-        # Try to dispatch more than 100 events
-        events_dispatched = 0
-        errors = 0
+        with pytest.raises(RuntimeError) as exc_info:
+            bus.dispatch(SimpleEvent())
 
-        for _ in range(150):
-            try:
-                bus.dispatch(SimpleEvent())
-                events_dispatched += 1
-            except RuntimeError as e:
-                if 'EventBus at capacity' in str(e):
-                    errors += 1
-                else:
-                    raise
-
-        print(f'\nDispatched {events_dispatched} events')
-        print(f'Hit capacity error {errors} times')
-
-        # Should hit the limit
-        assert events_dispatched <= 100
-        assert errors > 0
+        error_message = str(exc_info.value)
+        assert 'EventBus at capacity: 50 pending events (queue full).' in error_message
+        assert 'Queue: 50, Processing: 0.' in error_message
+        assert '100 pending' not in error_message
+        assert 'Processing: 50' not in error_message
 
     finally:
-        # Properly stop the bus to clean up pending tasks
-        await bus.stop(timeout=0, clear=True)  # Don't wait, just force cleanup
+        await bus.stop(timeout=0, clear=True)
 
 
 @pytest.mark.asyncio
