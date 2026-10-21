@@ -572,6 +572,7 @@ event = await bus.expect(
 ##### `wait_until_idle(timeout: float | None=None)`
 
 Wait until all events are processed and the bus is idle.
+If `stop()` is called, any pending idle wait returns. Waiting after `stop()` also returns immediately without restarting the bus.
 
 ```python
 await bus.wait_until_idle()             # wait indefinitely until EventBus has finished processing all events

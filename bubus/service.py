@@ -684,6 +684,9 @@ class EventBus:
     def _start(self) -> None:
         """Start the event bus if not already running"""
         if not self._is_running:
+            if self.event_queue is not None and self.event_queue._is_shutdown:  # pyright: ignore[reportPrivateUsage]
+                raise QueueShutDown
+
             try:
                 loop = asyncio.get_running_loop()
 
@@ -815,7 +818,10 @@ class EventBus:
             pass
 
     async def wait_until_idle(self, timeout: float | None = None) -> None:
-        """Wait until the event bus is idle (no events being processed and all handlers completed)"""
+        """Wait until the bus is idle or stopped."""
+
+        if not self._is_running and self.event_queue is not None and self.event_queue._is_shutdown:  # pyright: ignore[reportPrivateUsage]
+            return
 
         self._start()
         assert self._on_idle and self.event_queue, 'EventBus._start() must be called before wait_until_idle() is reached'
@@ -824,16 +830,8 @@ class EventBus:
         remaining_timeout = timeout
 
         try:
-            # First wait for the queue to be empty
-            join_task = asyncio.create_task(self.event_queue.join())
-            await asyncio.wait_for(join_task, timeout=remaining_timeout)
-
-            # Update remaining timeout
-            if timeout is not None:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                remaining_timeout = max(0, timeout - elapsed)
-
-            # Wait for idle state
+            # The run loop signals idle after draining the queue; stop() also
+            # sets this signal when aborting events that cannot finish queue.join().
             idle_task = asyncio.create_task(self._on_idle.wait())
             await asyncio.wait_for(idle_task, timeout=remaining_timeout)
 
@@ -843,7 +841,9 @@ class EventBus:
             await asyncio.sleep(0)  # Yield to event loop
 
             # Double-check we're truly idle - if new events came in, wait again
-            while not self._on_idle.is_set() or self.events_started or self.events_pending:
+            while self._is_running and (
+                not self._on_idle.is_set() or self.events_started or self.events_pending or self.event_queue.qsize()
+            ):
                 if timeout is not None:
                     elapsed = asyncio.get_event_loop().time() - start_time
                     remaining_timeout = max(0, timeout - elapsed)
@@ -899,9 +899,9 @@ class EventBus:
         if not self._is_running:
             return None
 
+        # Create a task for queue.get() so we can cancel it cleanly
+        get_next_queued_event = asyncio.create_task(self.event_queue.get())
         try:
-            # Create a task for queue.get() so we can cancel it cleanly
-            get_next_queued_event = asyncio.create_task(self.event_queue.get())
             if hasattr(get_next_queued_event, '_log_destroy_pending'):
                 get_next_queued_event._log_destroy_pending = False  # type: ignore  # Suppress warnings on this task in case of cleanup
 
@@ -922,9 +922,12 @@ class EventBus:
                     self._on_idle.set()
                 return None
 
-        except (asyncio.CancelledError, RuntimeError, QueueShutDown):
-            # Clean cancellation during shutdown or queue was shut down
+        except RuntimeError:
+            # Event loop is closing.
             return None
+        finally:
+            get_next_queued_event.cancel()
+            await asyncio.gather(get_next_queued_event, return_exceptions=True)
 
     async def step(
         self, event: 'BaseEvent[Any] | None' = None, timeout: float | None = None, wait_for_timeout: float = 0.1
